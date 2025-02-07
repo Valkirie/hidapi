@@ -1166,7 +1166,11 @@ int HID_API_EXPORT HID_API_CALL hid_read_timeout(hid_device *dev, unsigned char 
 		dev->read_pending = TRUE;
 		memset(dev->read_buf, 0, dev->input_report_length);
 		ResetEvent(ev);
-		res = ReadFile(dev->device_handle, dev->read_buf, (DWORD) dev->input_report_length, &bytes_read, &dev->ol);
+		res = ReadFile(dev->device_handle,
+			dev->read_buf,
+			(DWORD)dev->input_report_length,
+			&bytes_read,
+			&dev->ol);
 
 		if (!res) {
 			if (GetLastError() != ERROR_IO_PENDING) {
@@ -1185,36 +1189,33 @@ int HID_API_EXPORT HID_API_CALL hid_read_timeout(hid_device *dev, unsigned char 
 	}
 
 	if (overlapped) {
-		/* See if there is any data yet. */
+		/* Wait for the I/O to complete, or timeout */
 		res = WaitForSingleObject(ev, milliseconds >= 0 ? (DWORD)milliseconds : INFINITE);
 		if (res != WAIT_OBJECT_0) {
-			/* There was no data this time. Return zero bytes available,
-			   but leave the Overlapped I/O running. */
+			/* No data arrived in time.
+			   Cancel the pending I/O to prevent busy polling and clear the flag */
+			CancelIo(dev->device_handle);
+			dev->read_pending = FALSE;
 			return 0;
 		}
 
-		/* Get the number of bytes read. The actual data has been copied to the data[]
-		   array which was passed to ReadFile(). We must not wait here because we've
-		   already waited on our event above, and since it's auto-reset, it will have
-		   been reset back to unsignalled by now. */
-		res = GetOverlappedResult(dev->device_handle, &dev->ol, &bytes_read, FALSE/*don't wait now - already did on the prev step*/);
+		/* At this point the event was signaled.
+		   Retrieve the result of the overlapped I/O without waiting again. */
+		res = GetOverlappedResult(dev->device_handle, &dev->ol, &bytes_read, FALSE);
 	}
-	/* Set pending back to false, even if GetOverlappedResult() returned error. */
+	/* Clear the pending flag whether the I/O succeeded or failed */
 	dev->read_pending = FALSE;
 
 	if (res && bytes_read > 0) {
 		if (dev->read_buf[0] == 0x0) {
-			/* If report numbers aren't being used, but Windows sticks a report
-			   number (0x0) on the beginning of the report anyway. To make this
-			   work like the other platforms, and to make it work more like the
-			   HID spec, we'll skip over this byte. */
+			/* Windows may prefix a 0x0 report number when report numbers aren't used.
+			   Skip this byte to match other platforms/HID spec expectations. */
 			bytes_read--;
-			copy_len = length > bytes_read ? bytes_read : length;
-			memcpy(data, dev->read_buf+1, copy_len);
+			copy_len = (length > bytes_read) ? bytes_read : length;
+			memcpy(data, dev->read_buf + 1, copy_len);
 		}
 		else {
-			/* Copy the whole buffer, report number and all. */
-			copy_len = length > bytes_read ? bytes_read : length;
+			copy_len = (length > bytes_read) ? bytes_read : length;
 			memcpy(data, dev->read_buf, copy_len);
 		}
 	}
@@ -1227,7 +1228,7 @@ end_of_function:
 		return -1;
 	}
 
-	return (int) copy_len;
+	return (int)copy_len;
 }
 
 int HID_API_EXPORT HID_API_CALL hid_read(hid_device *dev, unsigned char *data, size_t length)
